@@ -1,7 +1,12 @@
 package main
 
-import "fmt"
+import (
+	"log"
+
+	"github.com/stescobedo92/json_commit/internal/server"
+)
 
 func main() {
-	fmt.Println("Hello World")
+	serv := server.NewHttpServer(":8080")
+	log.Fatal(serv.ListenAndServe())
 }
