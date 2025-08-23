@@ -3,88 +3,99 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 
 	"github.com/gorilla/mux"
+	"github.com/stescobedo92/json_commit/internal/log"
 )
 
 type httpServer struct {
-	Log *Log
+	Log *log.Log
 }
 
-type ProduceRequest struct {
-	Record Record `json:"record"`
-}
-type ProduceResponse struct {
-	Offset uint64 `json:"offset"`
-}
-type ConsumeRequest struct {
-	Offset uint64 `json:"offset"`
-}
-type ConsumeResponse struct {
-	Record Record `json:"record"`
-}
-
-func newHttpServer() *httpServer {
-	return &httpServer{
-		Log: NewLog(),
+func NewHTTPServer(addr string, log *log.Log) *http.Server {
+	srv := &httpServer{
+		Log: log,
 	}
-}
+	r := mux.NewRouter()
 
-func NewHttpServer(addr string) *http.Server {
-	httpsrv := newHttpServer()
-	router := mux.NewRouter()
-
-	router.HandleFunc("/", httpsrv.handleProduce).Methods("POST")
-	router.HandleFunc("/", httpsrv.handleConsume).Methods("GET")
+	r.HandleFunc("/records", srv.handleProduce).Methods("POST")
+	r.HandleFunc("/records/{offset}", srv.handleConsume).Methods("GET")
 
 	return &http.Server{
 		Addr:    addr,
-		Handler: router,
+		Handler: r,
 	}
 }
 
-func (serverLog *httpServer) handleProduce(writer http.ResponseWriter, request *http.Request) {
+type ProduceRequest struct {
+	Record log.Record `json:"record"`
+}
+
+type ProduceResponse struct {
+	Offset uint64 `json:"offset"`
+}
+
+type ConsumeResponse struct {
+	Record log.Record `json:"record"`
+}
+
+func (s *httpServer) handleProduce(w http.ResponseWriter, r *http.Request) {
 	var req ProduceRequest
-	err := json.NewDecoder(request.Body).Decode(&req)
-
-	if err != nil {
-		http.Error(writer, err.Error(), http.StatusBadRequest)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid request payload")
 		return
 	}
 
-	offset, err := serverLog.Log.Append(req.Record)
+	offset, err := s.Log.Append(req.Record)
 	if err != nil {
-		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		respondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	response := ProduceResponse{Offset: offset}
-	err = json.NewEncoder(writer).Encode(response)
-	if err != nil {
-		http.Error(writer, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	respondWithJSON(w, http.StatusCreated, ProduceResponse{Offset: offset})
 }
 
-func (serverLog *httpServer) handleConsume(writer http.ResponseWriter, request *http.Request) {
-	var req ConsumeRequest
-	err := json.NewDecoder(request.Body).Decode(&req)
+func (s *httpServer) handleConsume(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	offsetStr, ok := vars["offset"]
+	if !ok {
+		respondWithError(w, http.StatusBadRequest, "'offset' parameter is missing in URL")
+		return
+	}
 
+	offset, err := strconv.ParseUint(offsetStr, 10, 64)
 	if err != nil {
-		http.Error(writer, err.Error(), http.StatusBadRequest)
+		respondWithError(w, http.StatusBadRequest, "Invalid 'offset' parameter")
 		return
 	}
 
-	record, err := serverLog.Log.Read(req.Offset)
-	if err == ErrOffsetNotFound {
-		http.Error(writer, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	response := ConsumeResponse{Record: record}
-	err = json.NewEncoder(writer).Encode(response)
+	record, err := s.Log.Read(offset)
 	if err != nil {
-		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		if err == log.ErrOffsetNotFound {
+			respondWithError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		respondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+
+	respondWithJSON(w, http.StatusOK, ConsumeResponse{Record: record})
+}
+
+func respondWithError(w http.ResponseWriter, code int, message string) {
+	respondWithJSON(w, code, map[string]string{"error": message})
+}
+
+func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
+	response, err := json.Marshal(payload)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("Internal Server Error: failed to marshal JSON response"))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	w.Write(response)
 }
